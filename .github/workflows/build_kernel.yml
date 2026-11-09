@@ -1,0 +1,140 @@
+name: Build Axon kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+          description: 'Upload release'
+          type: boolean
+          required: true
+          default: false
+      changelog:
+          description: 'Changelog'
+          type: string
+          required: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      release_ts: ${{ steps.ts.outputs.release_ts }}
+
+    steps:
+      - name: Generate release date
+        id: ts
+        run: |
+          RELEASE_TS=$(date +'%Y%m%d-%H%M%S')
+          echo "release_ts=$RELEASE_TS" >> $GITHUB_OUTPUT
+
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      release_ts: ${{ steps.ts.outputs.release_ts }}
+    needs: prepare
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Install build tools
+        run: |
+          sudo apt-get install -y \
+            build-essential \
+            git \
+            curl \
+            unzip \
+            wget \
+            zip \
+            zstd
+
+      - name: Cache clang
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: llvm-21
+          key: clang-r563880c
+
+      - name: Download latest Google clang
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          wget -O llvm.tar.gz https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/b54cd2c8e9e0bb057aef3804d42d39c5ac4674c7/clang-r563880c.tar.gz
+          mkdir llvm-21; cd llvm-21
+          tar -xf ../llvm.tar.gz
+          rm ../llvm.tar.gz
+          cd ..
+
+      - name: Build kernel
+        run: |
+          chmod +x build.sh
+          bash build.sh 
+
+      - name: Generate release notes
+        run: |
+          : > version.txt
+          echo "![Downloads](https://img.shields.io/github/downloads/${{ github.repository }}/${{ needs.prepare.outputs.release_ts }}/total)" >> version.txt
+          echo >> version.txt
+          echo "**Kernel version:** $(cat out/include/config/kernel.release)  " >> version.txt
+          echo >> version.txt
+          export KHASH="$(git rev-parse HEAD)"
+          echo "**Kernel source:** [$KHASH](https://github.com/LineageOS/android_kernel_oneplus_sm8250/tree/$KHASH)" >> version.txt
+
+          if [ "${{ github.event.inputs.release }}" = "true" ] && \
+             [ -n "${{ github.event.inputs.changelog }}" ]; then
+            echo >> version.txt
+            echo "**Changelog:**" >> version.txt
+            echo >> version.txt
+            printf "%b\n" "${{ github.event.inputs.changelog }}" >> version.txt
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: AxonKernel-op8-${{ needs.prepare.outputs.release_ts }}
+          path: AnyKernel3/
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@v5
+        with:
+          name: release-notes
+          path: version.txt
+          retention-days: 1
+
+  release:
+    needs: [prepare, build]
+    if: github.event.inputs.release == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Zip build artifacts
+        run: |
+          cd artifacts
+          for dir in AxonKernel-*; do
+            (
+              cd "$dir"
+              zip -r "../${dir}.zip" .
+            )
+          done
+
+      - name: Download release version
+        uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: ./
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: version.txt
+          tag_name: "${{ needs.prepare.outputs.release_ts }}"
+          name: "AxonKernel-${{ needs.prepare.outputs.release_ts }}"
+          files: artifacts/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
